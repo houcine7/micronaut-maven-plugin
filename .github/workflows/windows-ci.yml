@@ -1,9 +1,9 @@
 name: Windows CI
-
 on:
   push:
     branches:
       - master
+      - houcine/usepodaman
       - '[1-9]+.[0-9]+.x'
   pull_request:
     branches:
@@ -17,18 +17,64 @@ jobs:
         java: ['17.0.12']
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Podman via Chocolatey
+        run: choco install podman-cli -y
+        shell: cmd   
+
+      # - name: Install and Setup Podman on Windows
+      #   shell: powershell
+      #   run: |
+      #     # Install Podman using winget (more reliable)
+      #     winget install RedHat.Podman --accept-source-agreements --accept-package-agreements
+      #
+      #     # Refresh PATH
+      #     $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
+      #
+      #     # Add to GitHub PATH for subsequent steps
+      #     echo "C:\Program Files\RedHat\Podman" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          
+      - name: Initialize Podman Machine
+        shell: powershell
+        run: |
+          # Initialize and start Podman machine
+          podman machine init --cpus 2 --memory 4096
+          podman machine start
+          
+          # Wait for Podman to be ready
+          $timeout = 60
+          $timer = 0
+          do {
+            Start-Sleep -Seconds 5
+            $timer += 5
+            $status = podman system connection list --format json | ConvertFrom-Json
+          } while ($timer -lt $timeout -and $status.Count -eq 0)
+          
+          # Verify Podman is working
+          podman version
+          
       - name: Cache Maven packages
         uses: actions/cache@v4
         with:
           path: ~/.m2
           key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
           restore-keys: ${{ runner.os }}-m2
+          
       - name: Setup GraalVM
         uses: graalvm/setup-graalvm@v1.3.3
         with:
           distribution: 'graalvm'
           java-version: ${{ matrix.java }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Configure Testcontainers for Podman
+        shell: powershell
+        run: |
+          # Configure Testcontainers to use Podman
+          echo "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/user/1000/podman/podman.sock" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "TESTCONTAINERS_HOST_OVERRIDE=localhost" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          
       - name: Build with Maven
         shell: cmd
         run: |
@@ -38,6 +84,11 @@ jobs:
           GRADLE_ENTERPRISE_ACCESS_KEY: ${{ secrets.GRADLE_ENTERPRISE_ACCESS_KEY }}
           GRADLE_ENTERPRISE_CACHE_USERNAME: ${{ secrets.GRADLE_ENTERPRISE_CACHE_USERNAME }}
           GRADLE_ENTERPRISE_CACHE_PASSWORD: ${{ secrets.GRADLE_ENTERPRISE_CACHE_PASSWORD }}
-
-
-
+          
+      - name: Cleanup Podman Machine
+        if: always()
+        shell: powershell
+        run: |
+          # Stop and remove Podman machine to clean up resources
+          podman machine stop
+          podman machine rm -f
